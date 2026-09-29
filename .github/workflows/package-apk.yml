@@ -1,0 +1,81 @@
+name: Package debug APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build tools
+        run: sdkmanager --install "build-tools;35.0.0"
+
+      - name: Repackage and sign APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          archive="$GITHUB_WORKSPACE/atlas-google-login-fixed.zip"
+          stage="$RUNNER_TEMP/atlas-apk"
+          mkdir -p "$stage" "$GITHUB_WORKSPACE/dist"
+          unzip -q "$archive" -d "$stage"
+
+          root="$(find "$stage" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$root"
+          test -f "$root/AndroidManifest.xml"
+          test -f "$root/classes.dex"
+
+          unsigned="$RUNNER_TEMP/atlas-unsigned.apk"
+          aligned="$RUNNER_TEMP/atlas-aligned.apk"
+          (cd "$root" && zip -q -r -0 "$unsigned" .)
+
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          "$tools/zipalign" -f -p 4 "$unsigned" "$aligned"
+
+          keystore="$RUNNER_TEMP/atlas-signing.jks"
+          if [[ -n "$ANDROID_KEYSTORE_BASE64" ]]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+            key_alias="$ANDROID_KEY_ALIAS"
+            store_password="$ANDROID_KEYSTORE_PASSWORD"
+            key_password="$ANDROID_KEY_PASSWORD"
+          else
+            keytool -genkeypair -noprompt \
+              -keystore "$keystore" \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -keyalg RSA -keysize 2048 -validity 10000
+            key_alias=androiddebugkey
+            store_password=android
+            key_password=android
+          fi
+
+          "$tools/apksigner" sign \
+            --ks "$keystore" \
+            --ks-key-alias "$key_alias" \
+            --ks-pass "pass:$store_password" \
+            --key-pass "pass:$key_password" \
+            --out "$GITHUB_WORKSPACE/dist/atlas-google-login-debug.apk" \
+            "$aligned"
+          "$tools/apksigner" verify --verbose --print-certs \
+            "$GITHUB_WORKSPACE/dist/atlas-google-login-debug.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-google-login-debug-apk
+          path: dist/atlas-google-login-debug.apk
+          if-no-files-found: error
